@@ -26,8 +26,8 @@ def integral_poly_o2(y, dx):
 
 def integrate_me(fctn, x_i, x_f, tol, y = np.array([])):
 	if x_i==x_f:
-		print("Start and end-points of integration are same. Assuming you didn't mean this and quiting.")
-		quit()
+		print("Start and end-points of integration are same. Returning zeros.") #Assuming you didn't mean this and quiting.
+		return 0.0, 0.0, 0.0
 
 	x  	   = np.linspace(x_i, x_f, 5)
 	dx 	   = np.diff(x)[0]

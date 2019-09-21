@@ -136,7 +136,7 @@ def main():
 		quit()
 	interp_table = create_interp_table(V, T, 3, 3)#Hardcoded Interpolation with 3 points and order 3 polynomials.
 
-	#Also harcoded to check 10 times as many Ts as provided in the valid range
+	#Also hardcoded to check 10 times as many Ts as provided in the valid range
 	more_V = np.linspace(V[1], V[-2]-1e-5, 10*len(V[1:-1]))
 	more_T = np.zeros(len(more_V))
 	err_T  = np.zeros(len(more_V))

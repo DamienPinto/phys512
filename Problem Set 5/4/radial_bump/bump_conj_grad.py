@@ -1,0 +1,387 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
+import scipy.constants as csts
+from scipy.interpolate import RegularGridInterpolator
+from heapq import nlargest
+import time
+
+
+
+
+def get_params(path):
+    param_file = open(path,'r')
+    param_str = param_file.read()
+    params = np.fromstring(param_str,sep=' ',dtype=float)
+    param_file.close()
+
+    return params
+
+
+
+
+def get_3d_cyl_w_bump(shape,r,l,pos,drctn=0):
+    '''
+    Function that can create a binary mask for a 3D cylinder of length 'l' and radius 'r' along any of the directions of the primary axes desiganted by 'drctn' and centered at pos. The user is tasked with making sure that the cylinder does not exceed the bounds of the space it will inhabit whose dimensions are specified by 'shape'.
+
+    '''
+    def others(drctn):
+        '''
+        Function that, when given one of three possible indicies specifying an axis in a 3D python array, returns the two others.
+        '''
+        return [(drctn-1)%3,(drctn+1)%3]
+    r = np.float64(r)
+    drctn = int(drctn)
+    [Lx,Ly,Lz] = shape
+    Lx = int(Lx)
+    Ly = int(Ly)
+    Lz = int(Lz)
+    x = np.linspace(0,Lx-1,Lx,dtype=float)
+    y = np.linspace(0,Ly-1,Ly,dtype=float)
+    z = np.linspace(0,Lz-1,Lz,dtype=float)
+    #Get grid indicating vector location of every point in space.
+    locations = np.array(np.meshgrid(x,y,z))
+    locations = np.einsum('ljik->ijkl',locations) #Fix some meshgrid oddity wrt order of dimensions.
+    res = locations - [[[pos]*Lz]*Ly]*Lx
+    #Compute distance from pos along the central axis of the cylinderof every point in space,
+    #As well as every point's perpendicular distance from said central axis.
+    perp_norm = np.sqrt(np.sum(res[:,:,:,others(drctn)]**2,axis=3))
+    par_norm = np.sqrt(res[:,:,:,drctn]**2)
+
+    #Create cylinder mask.
+    ones = np.ones(res.shape[:-1])
+    zeros = np.zeros(ones.shape)
+    cyl = np.where(np.logical_or(np.logical_and(perp_norm<=r,par_norm<=l),np.logical_and(perp_norm<=(1.1*r),np.abs(res[:,:,:,others(drctn)[0]]/res[:,:,:,others(drctn)[1]])<=0.17)),ones,zeros)
+    cyl_mask =  np.where(np.logical_or(np.logical_and(perp_norm<=r,par_norm<=l),np.logical_and(perp_norm<=(1.1*r),np.abs(res[:,:,:,others(drctn)[0]]/res[:,:,:,others(drctn)[1]])<=0.17)),True,False)
+
+    return cyl,cyl_mask,perp_norm
+
+
+
+
+
+def get_true_V(lamb,R,dist,mask):
+    V_in = lamb/(2*np.pi*csts.epsilon_0*R**2)*np.ones(dist.shape)
+    V_out = lamb*np.log(R/dist)/(2*np.pi*csts.epsilon_0)
+
+    V_true = np.zeros(dist.shape)
+    V_true[mask] = V_in[mask]
+    V_true[np.invert(mask)] = V_out[np.invert(mask)]
+    
+    return V_true
+
+
+
+
+def get_crappy_V(filepath,shape):
+    data_flat = np.fromstring(open(filepath,'w').read(), sep=", ",dtype=np.float64)
+    data = data_flat.reshape(shape)
+    plt.imshow(data[int(len(data)//2)])
+    
+    return data
+
+
+
+
+def pad_mat(mat,pad_amt):
+    mat_shape = np.array(np.shape(mat))
+    base_shape = mat_shape+2*pad_amt
+
+    # print("Mat shape: ",mat.shape)
+
+    base = np.zeros(base_shape)
+    # print("Base shape: ",base.shape)
+    # print("Truncated base shape: ",(base[pad_amt:-pad_amt,pad_amt:-pad_amt,pad_amt:-pad_amt]).shape)
+    base[pad_amt:-pad_amt,pad_amt:-pad_amt,pad_amt:-pad_amt] = mat[:,:,:]
+
+    return base
+
+
+
+
+#Basically same as prof Sievers' code in his laplace_conjgrad.py
+def conj_grad(data,guess,A_func,mask,niter,thresh):
+    r = data - A_func(guess,mask) #Our data minus our best guess at a fit.
+    p = r.copy()
+    results = guess.copy()
+    t1 = time.time()
+    relax_thresh = 1.0
+    comp = 0
+
+    for i in range(niter):
+        Ap = (A_func(pad_mat(p,1),mask)) #1 is actually degree of derivative that is enacted on data -1.
+        r2 = np.sum(r*r)
+        alpha = r2/np.sum(Ap*p) #Magnitude squared of our residuals divided by the magnitude of our gradient vector?
+
+        changes = pad_mat(alpha*p,1)
+        if i%10==0:
+            print("(i,r2): (%d,%.2e)"%(i,r2))
+            print("Sum of sqrt of changes is: %.2e." % (np.sum(np.abs(changes))))
+
+        results = results + changes
+        # if np.sum(np.abs(changes)) < relax_thresh and comp == 0.0:
+        #     print("Sum of magnitude of pixel changes has passed the threshold set during the relaxation method script in %d iterations."%(i))
+        #     plt.clf()
+        #     plt.imshow((results+changes)[int(len(results)//2),:,:])
+        #     plt.colorbar()
+        #     plt.title("Conjugate Gradient and RElaxation Comparison")
+        #     plt.savefig("comp_to_relax_V.png")
+        #     comp = 1
+
+        r_new = r - alpha*Ap
+        beta = np.sum(r_new*r_new)/r2
+        p = r_new + beta*p
+        r = r_new
+
+        plt.clf()
+        plt.imshow(results[int(len(results)//2),:,:])
+        plt.colorbar()
+        plt.pause(0.001)
+
+        if np.sum(r*r) < thresh:
+            print("Squared residuals at step %d are %.2e < %.2e. Stopping and returning results." % (i,np.sum(r*r),thresh))
+            t2 = time.time()
+            print("Time taken for conj grad method: %f." %(t2-t1))
+            
+            return results
+    print("Maximum number of iterations undergone without achieving bar designated by threshold. Returning results with squared residuals %f." % (np.sum(r*r)))
+    print("Time taken for conj grad method: %f." %(t2-t1))
+    
+    return results
+
+
+
+
+#This a copy-paste essentially of prof Sievers' function as I don't
+#100% understand how it works. He says in his comment that, in charge
+#free region, "we know that [...] V0+0.25*(V_l+V_r+V_u+V_d)=0"
+#But it seems to be that, from Laplace's, we know that
+# V0 = 0.25*(V_l+V_r+V_u+V_d)
+#Essentially the sae thing but with a sign-difference
+# def make_rhs(data,mask):
+#     rhs = np.zeros(data.shape)
+#     rhs[:-1,:,:] = rhs[:-1,:,:] + data[1:,:,:]
+#     rhs[1:,:,:] = rhs[1:,:] + data[:-1,:,:]
+#     rhs[:,:-1,:] = rhs[:,:-1,:] + data[:,1:,:]
+#     rhs[:,1:,:] = rhs[:,1:,:] + data[:,:-1,:]
+#     rhs[:,:,:-1] = rhs[:,:,:-1] + data[:,:,1:]
+#     rhs[:,:,1:] = rhs[:,:,1:] + data[:,:,-1:]
+#     rhs[mask] = 0.0
+
+#     return rhs[1:-1,1:-1,1:-1]
+
+
+
+def make_rhs(data):
+    rhs = -(data[2:,1:-1,1:-1]+data[:-2,1:-1,1:-1]+data[1:-1,:-2,1:-1]+data[1:-1,2:,1:-1]+data[1:-1,1:-1,2:]+data[1:-1,1:-1,:-2])/6.0
+    return rhs
+
+
+
+
+#Again, basically same as prof Sievers' code in his laplace_conjgrad.py
+def mat_3d_Lapl(data,mask):
+    data_new = np.array(data.copy())
+    # print(data.shape,mask.shape)
+    data_new[mask] = 0.0
+    avg = (data_new[:-2,1:-1,1:-1]+data_new[2:,1:-1,1:-1]+data_new[1:-1,:-2,1:-1]+data_new[1:-1,2:,1:-1]+data_new[1:-1,1:-1,:-2]+data_new[1:-1,1:-1,2:])/6.0
+    data_Lapl = avg - data[1:-1,1:-1,1:-1]
+
+    return data_Lapl
+
+
+
+# Again, basically Sievers' de_res, but returns all resolutions at once.
+def de_res(data,f,n):
+    all_res = [None]*n
+    all_res[0] = data
+    deres_shape = np.array(data.shape)
+    for i in range(1,n):
+        deres_shape = deres_shape//int(f)
+        # print("deres_shape: ",deres_shape)
+        low_res = np.zeros(deres_shape,dtype=data.dtype)
+        F = f**i
+        low_res = np.maximum(low_res,data[::F,::F,::F])
+        low_res = np.maximum(low_res,data[(F-1)::F,::F,::F])
+        low_res = np.maximum(low_res,data[::F,(F-1)::F,::F])
+        low_res = np.maximum(low_res,data[::F,::F,(F-1)::F])
+        low_res = np.maximum(low_res,data[::F,(F-1)::F,(F-1)::F])
+        low_res = np.maximum(low_res,data[(F-1)::F,(F-1)::F,::F])
+        low_res = np.maximum(low_res,data[(F-1)::F,::F,(F-1)::F])
+        low_res = np.maximum(low_res,data[(F-1)::F,(F-1)::F,(F-1)::F])
+        
+
+        all_res[i] = low_res
+
+    return all_res
+
+
+
+
+def up_res_conj_grad(bc_scales,mask_scales,A_func,rhs_func,f,niter,thresh):
+    n = np.shape(mask_scales)[0]
+    
+    rhs_scales = [None]*n
+    rhs_scales[-1] = rhs_func(bc_scales[-1])#,mask_scales[-1])
+    
+    init_x = 0*mask_scales[-1]
+    x_scales = [None]*n
+    # print(np.shape(rhs_scales[-1]),np.shape(init_x),np.shape(mask_scales[-1]))
+    x_scales[-1] = conj_grad(rhs_scales[-1],init_x,A_func,mask_scales[-1],niter,thresh)
+
+    #Do the thing
+    for i in range(n-2,-1,-1):
+        rhs_scales[i] = rhs_func(bc_scales[i])#,mask_scales[i])
+        x_tmp = up_res(x_scales[i+1],f,1)[0]
+        x_scales[i] = conj_grad(rhs_scales[i],x_tmp,A_func,mask_scales[i],niter,thresh)
+        print(x_scales[i].shape)
+        plt.clf()
+        plt.imshow(x_scales[i][int(len(x_scales[i])//2),:,:])
+        plt.colorbar()
+        plt.pause(0.01)
+
+    #Paste back in bcs bc/ we were cheeky and didn't consider then while fitting. Hope this was legal.
+    for i in range(n):
+        x_scales[i][mask_scales[i]] = bc_scales[i][mask_scales[i]]
+
+    return x_scales
+
+
+
+def up_res(data,f,n):
+    all_res = [None]*n
+    og_shape = np.array(data.shape)
+    upres_shape = og_shape.copy()
+    x = np.linspace(1,og_shape[0],upres_shape[0])
+    y = np.linspace(1,og_shape[1],upres_shape[1])
+    z = np.linspace(1,og_shape[2],upres_shape[2])
+    interp_func = RegularGridInterpolator((x,y,z),data)
+
+    for i in range(n):
+        upres_shape = np.array(upres_shape*int(f),dtype=int)
+        xf = np.linspace(1,og_shape[0],upres_shape[0])
+        yf = np.linspace(1,og_shape[1],upres_shape[1])
+        zf = np.linspace(1,og_shape[2],upres_shape[2])
+
+        grid = np.array(np.meshgrid(xf,yf,zf,indexing='ij'))
+        grid = np.einsum('lijk->ijkl',grid)
+        all_res[i] = interp_func(grid)
+
+    return all_res
+
+
+
+
+def get_E(data):
+    E = np.sqrt(np.sum(np.array(np.gradient(data,1.0))**2,axis=0))
+    print(E.shape)
+    return E
+        
+
+
+
+def main():
+    param_filename = sys.argv[1]
+    params = get_params(param_filename)
+    #             space dims,    r    ,    l    ,  pos    ,  drctn
+    cyl_params = [params[:3],params[3],params[4],params[5:8],params[8]]
+    R = params[3]
+    l = params[4]
+    # lamb = params[9]/(2*np.pi*R**2 + l*2*np.pi*R) 
+    lamb = 2*np.pi*csts.epsilon_0*R**2 #Set charge density such that V = 1 inside cylinder.
+    niter = int(params[10])
+    thresh = params[11]
+    plt.ion()
+
+    ################################################
+    # Get boundary conditions and mask at full res #
+    ################################################
+    
+    cyl,cyl_mask,perp_norm = get_3d_cyl_w_bump(*cyl_params)
+    #If you want to use what the relaxation solution came up with.
+    # crappy_V = get_crappy_V("../1/final_num_V.txt",params[:3])
+    V_init = np.zeros(cyl.shape)
+    bc = lamb*cyl/(2*np.pi*csts.epsilon_0*R**2)
+
+    #####################################################
+    # De-res a few times by factor of two bcs and masks #
+    #####################################################
+
+    #Doing like prof Sievers and de-res-ing 6 times before starting
+    npass = 3
+    de_res_factor = 2
+    bc_scales = de_res(bc,de_res_factor,npass)
+    mask_scales = de_res(cyl_mask,de_res_factor,npass)
+    
+    #############################################################
+    # Initialize rhs and x for lowest resolution mask and bc    #
+    # Cycle through scales while effecting a conjugate gradient #
+    #############################################################
+
+    V_scales = up_res_conj_grad(bc_scales,mask_scales,mat_3d_Lapl,make_rhs,2,niter,thresh)
+
+    plt.clf()
+    plt.imshow(V_scales[0][int(len(V_scales[0])//2),:,:])
+    plt.colorbar()
+    plt.title("Variable Resolution Conjugate Gradient Electric Potential")
+    plt.savefig("var_res_conj_grad_V.png")
+    plt.show()
+    
+    rho = mat_3d_Lapl(V_scales[0],cyl_mask)
+    plt.clf()
+    plt.imshow(rho[int(len(rho)//2),:,:])
+    plt.colorbar()
+    plt.title("Vriable Resolution Conjugate Gradient Charge Density")
+
+    plt.clf()
+    x = np.linspace(0,int(len(V_scales[0])//2)-1,int(len(V_scales[0])//2))
+    plt.plot(x,V_scales[0][int(len(V_scales[0])//2),int(len(V_scales[0])//2),int(len(V_scales[0])//2):])
+    V_in = np.ones(int(R))
+    V_out = np.log(int(len(V_scales[0])//2)/x[int(R):])*0.6
+    V = np.concatenate((V_in,V_out))
+    plt.plot(x,V,color='r')
+    plt.title("Electric Potential Obtained with Conjugate Gradient (line from center to edge)")
+    plt.savefig("cg_V_line.png")
+
+    V_true = get_true_V(lamb,R,perp_norm,cyl_mask)
+    plt.clf()
+    plt.imshow(V_true[int(len(V_true)//2),:,:])
+    plt.colorbar()
+    plt.title("Analytic Electric Potential")
+    plt.savefig("true_V.png")
+
+    diffs = np.abs(V_scales[0] - V_true)
+    plt.clf()
+    plt.imshow(diffs[int(len(diffs)//2),:,:])
+    plt.colorbar()
+    plt.title("Differences in Electric Potentials")
+    plt.savefig("diffs_V.png")
+
+    E = get_E(V_scales[0])
+
+    E_file = open("E_data.png","w")
+    E_file.write(str(E[int(len(E)//2)].flatten().tolist()))
+    E_file.close()
+
+    E_line = E[int(len(E)//2),90:160,int(len(E)//2 + 35)]
+    x_E = np.linspace(90,160-90-1,160-90)
+    plt.clf()
+    plt.plot(x_E,E_line)
+    plt.title("Electric Field Along Line at a Constant Distance from Cylinder")
+    plt.ylabel("E")
+    plt.xlabel("x")
+    plt.savefig("line_cst_dist_E.png")
+
+    plt.clf()
+    plt.imshow(E[int(len(E)//2),:,:])
+    plt.colorbar()
+    plt.title("Variable Resolution Conjugate Gradient Electric Field")
+    plt.savefig("res_cg_E.png")
+    #plt.show()
+    #plt.pause(180)
+
+
+
+    
+if __name__ == "__main__":
+    main()
